@@ -46,6 +46,14 @@ const (
 	// federated credential takes effect in the provider within an hour.
 	maxTokenReuse = time.Hour
 
+	// evictionInterval bounds how often the cache looks for entries to drop.
+	evictionInterval = 10 * time.Minute
+
+	// exchangeTimeout bounds a token exchange that the authority accepts but
+	// never answers. Reconcile contexts usually have no deadline, and a stuck
+	// exchange would hold its identity's cache lock.
+	exchangeTimeout = 30 * time.Second
+
 	errRequestSAToken  = "cannot request a token for service account %s/%s"
 	errEmptySAToken    = "token request for service account %s/%s returned an empty token"
 	errExchangeRequest = "cannot build the token exchange request"
@@ -135,7 +143,8 @@ func (s *ServiceAccountTokenSource) CacheKey() string {
 // using the OAuth 2.0 client credentials grant with a JWT client assertion
 // (RFC 7523), the same exchange Azure workload identity performs.
 type AzureADExchanger struct {
-	// HTTPClient used for the exchange. Defaults to http.DefaultClient.
+	// HTTPClient used for the exchange. Defaults to a client with a
+	// 30-second timeout.
 	HTTPClient *http.Client
 	// AuthorityHost, e.g. https://login.microsoftonline.com/. Defaults to
 	// DefaultAzureAuthorityHost.
@@ -236,9 +245,12 @@ func (e *AzureADExchanger) scope() string {
 	return e.Scope
 }
 
+// defaultExchangeClient uses the default transport, with a timeout.
+var defaultExchangeClient = &http.Client{Timeout: exchangeTimeout}
+
 func (e *AzureADExchanger) httpClient() *http.Client {
 	if e.HTTPClient == nil {
-		return http.DefaultClient
+		return defaultExchangeClient
 	}
 	return e.HTTPClient
 }
@@ -271,8 +283,9 @@ func parseExpiresIn(raw json.RawMessage) (int64, error) {
 // is exchanged once per lifetime rather than once per reconcile (upjet builds
 // a new Terraform setup on every connect).
 type TokenCache struct {
-	mu      sync.Mutex
-	entries map[string]*cacheEntry
+	mu        sync.Mutex
+	entries   map[string]*cacheEntry
+	lastEvict time.Time
 	// Now returns the current time. Defaults to time.Now.
 	Now func() time.Time
 }
@@ -295,8 +308,10 @@ func NewTokenCache() *TokenCache {
 // AccessToken.needsRefresh). Failures are not cached.
 func (c *TokenCache) Get(ctx context.Context, src TokenSource, ex Exchanger) (*AccessToken, error) {
 	key := src.CacheKey() + "->" + ex.CacheKey()
+	now := c.now()
 
 	c.mu.Lock()
+	c.evictLocked(now)
 	e, ok := c.entries[key]
 	if !ok {
 		e = &cacheEntry{}
@@ -306,7 +321,7 @@ func (c *TokenCache) Get(ctx context.Context, src TokenSource, ex Exchanger) (*A
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.token != nil && !e.token.needsRefresh(c.now()) {
+	if e.token != nil && !e.token.needsRefresh(now) {
 		return e.token, nil
 	}
 
@@ -320,6 +335,32 @@ func (c *TokenCache) Get(ctx context.Context, src TokenSource, ex Exchanger) (*A
 	}
 	e.token = t
 	return t, nil
+}
+
+// evictLocked drops entries that would be refreshed on their next use anyway
+// (or never obtained a token) and that no caller holds, so identities that are
+// no longer configured, or old cache keys after a ProviderConfig change, don't
+// accumulate. With maxTokenReuse, an unused entry lives at most about an hour
+// plus evictionInterval. Runs with c.mu held, at most once per
+// evictionInterval.
+//
+// A caller that looked up an entry but hasn't locked it yet may still use it
+// after it is dropped; it then caches into the dropped entry, and the next
+// caller exchanges again. That costs one extra exchange, never a wrong token.
+func (c *TokenCache) evictLocked(now time.Time) {
+	if now.Sub(c.lastEvict) < evictionInterval {
+		return
+	}
+	c.lastEvict = now
+	for k, e := range c.entries {
+		if !e.mu.TryLock() {
+			continue
+		}
+		if e.token == nil || e.token.needsRefresh(now) {
+			delete(c.entries, k)
+		}
+		e.mu.Unlock()
+	}
 }
 
 func (c *TokenCache) now() time.Time {

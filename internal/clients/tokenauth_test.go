@@ -160,6 +160,13 @@ func TestAzureADExchanger(t *testing.T) {
 		}
 	})
 
+	t.Run("defaults to an HTTP client with a timeout", func(t *testing.T) {
+		ex := &AzureADExchanger{TenantID: "t", ClientID: "c"}
+		if got := ex.httpClient().Timeout; got != exchangeTimeout {
+			t.Errorf("default client timeout = %s, want %s", got, exchangeTimeout)
+		}
+	})
+
 	t.Run("defaults authority and scope", func(t *testing.T) {
 		ex := &AzureADExchanger{TenantID: "t", ClientID: "c"}
 		if got, want := ex.tokenEndpoint(), "https://login.microsoftonline.com/t/oauth2/v2.0/token"; got != want {
@@ -277,6 +284,60 @@ func TestTokenCache(t *testing.T) {
 		b, _ := c.Get(context.Background(), srcB, ex)
 		if a.Value == b.Value {
 			t.Errorf("different service accounts got the same token %q", a.Value)
+		}
+	})
+
+	t.Run("evicts entries that would be refreshed anyway", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		ex := &countingExchanger{key: "id", lifetime: 24 * time.Hour, now: clock}
+		stale, active := &countingSource{key: "sa-stale"}, &countingSource{key: "sa-active"}
+		if _, err := c.Get(context.Background(), stale, ex); err != nil {
+			t.Fatal(err)
+		}
+
+		// Within maxTokenReuse: nothing is evicted.
+		now = now.Add(30 * time.Minute)
+		if _, err := c.Get(context.Background(), active, ex); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.entries) != 2 {
+			t.Fatalf("entries = %d at 30 minutes, want 2", len(c.entries))
+		}
+
+		// The stale entry is past maxTokenReuse; the active one isn't.
+		now = now.Add(31 * time.Minute)
+		if _, err := c.Get(context.Background(), active, ex); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := c.entries["sa-stale->id"]; ok {
+			t.Error("stale entry kept, want evicted")
+		}
+		if _, ok := c.entries["sa-active->id"]; !ok {
+			t.Error("active entry evicted, want kept")
+		}
+		if ex.calls.Load() != 2 {
+			t.Errorf("exchanger calls = %d, want 2 (the active entry is still cached)", ex.calls.Load())
+		}
+	})
+
+	t.Run("doesn't evict an entry in use", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		ex := &countingExchanger{key: "id", lifetime: time.Hour, now: clock}
+		src := &countingSource{key: "sa"}
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(2 * time.Hour)
+		e := c.entries["sa->id"]
+		e.mu.Lock()
+		c.mu.Lock()
+		c.evictLocked(now)
+		c.mu.Unlock()
+		e.mu.Unlock()
+		if _, ok := c.entries["sa->id"]; !ok {
+			t.Error("locked entry evicted, want kept")
 		}
 	})
 

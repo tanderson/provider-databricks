@@ -58,9 +58,9 @@ type TokenExchange struct {
 }
 
 // AzureADTokenExchange holds settings specific to the AzureAD exchange. The
-// client and tenant IDs come from the ProviderConfig's clientID and tenantID,
-// or default to the service account's azure.workload.identity/client-id and
-// azure.workload.identity/tenant-id annotations.
+// client and tenant IDs come from the service account's
+// azure.workload.identity/client-id and azure.workload.identity/tenant-id
+// annotations; this API has no clientID or tenantID fields.
 type AzureADTokenExchange struct {
 	// AuthorityHost of the Entra ID token endpoint. Defaults to
 	// https://login.microsoftonline.com/.
