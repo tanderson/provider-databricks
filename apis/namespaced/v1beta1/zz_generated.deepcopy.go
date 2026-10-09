@@ -170,6 +170,11 @@ func (in *ProviderConfigSpec) DeepCopyInto(out *ProviderConfigSpec) {
 		*out = new(TokenExchange)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.AccountID != nil {
+		in, out := &in.AccountID, &out.AccountID
+		*out = new(string)
+		**out = **in
+	}
 	if in.ClientID != nil {
 		in, out := &in.ClientID, &out.ClientID
 		*out = new(string)

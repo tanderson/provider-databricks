@@ -111,6 +111,10 @@ func TestEnvtestCELRules(t *testing.T) {
 			s.TokenExchange = &namespacedv1beta1.TokenExchange{Type: &typ, AzureAD: &namespacedv1beta1.AzureADTokenExchange{AuthorityHost: ref("https://login.microsoftonline.com/")}}
 			s.Credentials.ServiceAccountRef.Audiences = []string{"databricks://dp-a/ok-full"}
 		})},
+		"namespaced: valid account-level": {obj: nsPC("ok-account", func(s *namespacedv1beta1.ProviderConfigSpec) {
+			s.Host = ref("https://accounts.azuredatabricks.net")
+			s.AccountID = ref("00000000-0000-0000-0000-000000000001")
+		})},
 		"namespaced: missing host":               {obj: nsPC("no-host", func(s *namespacedv1beta1.ProviderConfigSpec) { s.Host = nil }), wantErr: "host is required"},
 		"namespaced: missing serviceAccountRef":  {obj: nsPC("no-ref", func(s *namespacedv1beta1.ProviderConfigSpec) { s.Credentials.ServiceAccountRef = nil }), wantErr: "serviceAccountRef is required"},
 		"namespaced: empty service account name": {obj: nsPC("empty-name", func(s *namespacedv1beta1.ProviderConfigSpec) { s.Credentials.ServiceAccountRef.Name = "" }), wantErr: "spec.credentials.serviceAccountRef.name"},
@@ -133,6 +137,23 @@ func TestEnvtestCELRules(t *testing.T) {
 		"cluster-scoped: valid ClusterProviderConfig": {obj: &namespacedv1beta1.ClusterProviderConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: "cluster-ok"},
 			Spec:       nsPC("unused", func(s *namespacedv1beta1.ProviderConfigSpec) { s.Credentials.ServiceAccountRef.Namespace = ref("dp-a") }).Spec,
+		}},
+		"cluster-scoped: missing namespace": {obj: &namespacedv1beta1.ClusterProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-no-ns"},
+			Spec:       nsPC("unused", nil).Spec,
+		}, wantErr: "serviceAccountRef with a namespace is required"},
+		"cluster-scoped: missing serviceAccountRef": {obj: &namespacedv1beta1.ClusterProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-no-ref"},
+			Spec:       nsPC("unused", func(s *namespacedv1beta1.ProviderConfigSpec) { s.Credentials.ServiceAccountRef = nil }).Spec,
+		}, wantErr: "serviceAccountRef with a namespace is required"},
+		"cluster-scoped: existing Secret config unaffected": {obj: &namespacedv1beta1.ClusterProviderConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-secret"},
+			Spec: namespacedv1beta1.ProviderConfigSpec{Credentials: namespacedv1beta1.ProviderCredentials{
+				Source: xpv2.CredentialsSourceSecret,
+				CommonCredentialSelectors: xpv2.CommonCredentialSelectors{SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Namespace: "crossplane-system", Name: "creds"}, Key: "credentials",
+				}},
+			}},
 		}},
 		"legacy: valid":             {obj: legacyPC("legacy-ok", nil)},
 		"legacy: missing namespace": {obj: legacyPC("legacy-no-ns", func(s *clusterv1beta1.ProviderConfigSpec) { s.Credentials.ServiceAccountRef.Namespace = nil }), wantErr: "serviceAccountRef with a namespace is required"},

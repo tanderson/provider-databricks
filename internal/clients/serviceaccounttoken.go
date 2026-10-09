@@ -86,12 +86,15 @@ func serviceAccountTokenAuth(ctx context.Context, kube client.Client, pcSpec *na
 	ps.Configuration[keyHost] = *pcSpec.Host
 	ps.Configuration[keyAuthType] = authTypePAT
 	ps.Configuration[keyAuthToken] = token.Value
+	if v := deref(pcSpec.AccountID); v != "" {
+		ps.Configuration[keyAccountID] = v
+	}
 	return nil
 }
 
-// serviceAccountRef returns the validated service account reference. The CRD's
-// CEL rules enforce most of this, but a ClusterProviderConfig can't require a
-// namespace in CEL, and old API servers may not evaluate CEL at all.
+// serviceAccountRef returns the validated service account reference. The CRDs'
+// CEL rules enforce this too, but old API servers may not evaluate CEL, and a
+// namespaced ProviderConfig's namespace is only filled in at resolve time.
 func serviceAccountRef(pcSpec *namespacedv1beta1.ProviderConfigSpec) (*namespacedv1beta1.ServiceAccountReference, error) {
 	ref := pcSpec.Credentials.ServiceAccountRef
 	if ref == nil {

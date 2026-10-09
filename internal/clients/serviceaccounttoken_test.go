@@ -108,6 +108,28 @@ func TestServiceAccountTokenAuth(t *testing.T) {
 		}
 	})
 
+	t.Run("configures account_id for an accounts console host", func(t *testing.T) {
+		entra := fakeEntra(t, testClientID, "sa-token:dp-a/dp-a")
+		kube := tokenFor(annotatedSA("dp-a", "dp-a")).Build()
+
+		spec := saSpec("dp-a", "dp-a", entra.URL)
+		spec.Host = ref("https://accounts.azuredatabricks.net")
+		spec.AccountID = ref("00000000-0000-0000-0000-000000000001")
+		ps := &terraform.Setup{Configuration: map[string]any{}}
+		if err := serviceAccountTokenAuth(context.Background(), kube, spec, ps, NewTokenCache()); err != nil {
+			t.Fatalf("serviceAccountTokenAuth() error: %v", err)
+		}
+		want := map[string]any{
+			keyHost:      "https://accounts.azuredatabricks.net",
+			keyAccountID: "00000000-0000-0000-0000-000000000001",
+			keyAuthType:  authTypePAT,
+			keyAuthToken: "entra-access-token",
+		}
+		if diff := cmp.Diff(want, map[string]any(ps.Configuration)); diff != "" {
+			t.Errorf("configuration (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("requests the exchanger's audience first, then the extras, without duplicates", func(t *testing.T) {
 		entra := fakeEntra(t, testClientID, "fake-token")
 		var got []string

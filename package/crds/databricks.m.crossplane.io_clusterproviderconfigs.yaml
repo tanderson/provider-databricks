@@ -49,8 +49,15 @@ spec:
           metadata:
             type: object
           spec:
-            description: A ProviderConfigSpec defines the desired state of a ProviderConfig.
+            description: A ProviderConfigSpec defines the desired state of a ClusterProviderConfig.
             properties:
+              accountID:
+                description: |-
+                  AccountID is the Databricks account ID, for account-level operations
+                  through the accounts console host (for example
+                  https://accounts.azuredatabricks.net). Used when Credentials.Source is
+                  ServiceAccountToken; leave unset for a workspace host.
+                type: string
               clientID:
                 description: |-
                   ClientID is the user-assigned managed identity's ID
@@ -123,9 +130,9 @@ spec:
                         type: string
                       namespace:
                         description: |-
-                          Namespace of the service account. Only honoured on a
-                          ClusterProviderConfig; a namespaced ProviderConfig always uses its own
-                          namespace and is rejected if this names another one.
+                          Namespace of the service account. Required on a ClusterProviderConfig;
+                          a namespaced ProviderConfig always uses its own namespace and is
+                          rejected if this names another one.
                         type: string
                     required:
                     - name
@@ -244,6 +251,10 @@ spec:
             - credentials
             type: object
             x-kubernetes-validations:
+            - message: serviceAccountRef with a namespace is required when credentials.source
+                is ServiceAccountToken
+              rule: self.credentials.source != 'ServiceAccountToken' || (has(self.credentials.serviceAccountRef)
+                && has(self.credentials.serviceAccountRef.namespace))
             - message: host is required when credentials.source is ServiceAccountToken
               rule: self.credentials.source != 'ServiceAccountToken' || has(self.host)
           status:

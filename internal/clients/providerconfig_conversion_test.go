@@ -23,7 +23,8 @@ func TestLegacyToModernProviderConfigSpecCarriesTokenAuthFields(t *testing.T) {
 				Audiences: []string{"extra"},
 			},
 		},
-		Host: ref("https://adb-1.0.azuredatabricks.net"),
+		Host:      ref("https://adb-1.0.azuredatabricks.net"),
+		AccountID: ref("00000000-0000-0000-0000-000000000001"),
 		TokenExchange: &clusterv1beta1.TokenExchange{
 			Type:    &azureAD,
 			AzureAD: &clusterv1beta1.AzureADTokenExchange{AuthorityHost: ref("https://login.example/")},
@@ -45,7 +46,8 @@ func TestLegacyToModernProviderConfigSpecCarriesTokenAuthFields(t *testing.T) {
 				Audiences: []string{"extra"},
 			},
 		},
-		Host: ref("https://adb-1.0.azuredatabricks.net"),
+		Host:      ref("https://adb-1.0.azuredatabricks.net"),
+		AccountID: ref("00000000-0000-0000-0000-000000000001"),
 		TokenExchange: &namespacedv1beta1.TokenExchange{
 			Type:    &modernAzureAD,
 			AzureAD: &namespacedv1beta1.AzureADTokenExchange{AuthorityHost: ref("https://login.example/")},

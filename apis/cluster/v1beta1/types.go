@@ -27,6 +27,13 @@ type ProviderConfigSpec struct {
 	// to type AzureAD.
 	// +optional
 	TokenExchange *TokenExchange `json:"tokenExchange,omitempty"`
+
+	// AccountID is the Databricks account ID, for account-level operations
+	// through the accounts console host (for example
+	// https://accounts.azuredatabricks.net). Used when Credentials.Source is
+	// ServiceAccountToken; leave unset for a workspace host.
+	// +optional
+	AccountID *string `json:"accountID,omitempty"`
 }
 
 // ProviderCredentials required to authenticate.

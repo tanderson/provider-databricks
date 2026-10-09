@@ -22,9 +22,9 @@ type ServiceAccountReference struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Namespace of the service account. Only honoured on a
-	// ClusterProviderConfig; a namespaced ProviderConfig always uses its own
-	// namespace and is rejected if this names another one.
+	// Namespace of the service account. Required on a ClusterProviderConfig;
+	// a namespaced ProviderConfig always uses its own namespace and is
+	// rejected if this names another one.
 	// +optional
 	Namespace *string `json:"namespace,omitempty"`
 

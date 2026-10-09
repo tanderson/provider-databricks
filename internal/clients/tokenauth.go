@@ -40,6 +40,12 @@ const (
 	// with for the whole operation.
 	tokenRefreshSkew = 5 * time.Minute
 
+	// maxTokenReuse caps how long a cached access token is reused, whatever its
+	// lifetime. Entra ID issues managed identity tokens valid for about 24
+	// hours; re-exchanging hourly means revoking the namespace's RBAC or the
+	// federated credential takes effect in the provider within an hour.
+	maxTokenReuse = time.Hour
+
 	errRequestSAToken  = "cannot request a token for service account %s/%s"
 	errEmptySAToken    = "token request for service account %s/%s returned an empty token"
 	errExchangeRequest = "cannot build the token exchange request"
@@ -56,13 +62,16 @@ type AccessToken struct {
 	ExpiresAt time.Time
 }
 
-// needsRefresh reports whether a cached token should be replaced: once half
-// its lifetime has passed, or when less than tokenRefreshSkew remains. Handing
-// out only tokens with at least half their lifetime left (about 30 minutes for
-// Entra ID) leaves room for long-running operations that keep the token.
+// needsRefresh reports whether a cached token should be replaced: once it is
+// maxTokenReuse old, once half its lifetime has passed, or when less than
+// tokenRefreshSkew remains. Handing out only tokens with at least half their
+// lifetime left leaves room for long-running operations that keep the token;
+// the age cap bounds how long a revoked identity keeps working.
 func (t *AccessToken) needsRefresh(now time.Time) bool {
 	remaining := t.ExpiresAt.Sub(now)
-	return remaining < tokenRefreshSkew || remaining < t.ExpiresAt.Sub(t.IssuedAt)/2
+	return now.Sub(t.IssuedAt) >= maxTokenReuse ||
+		remaining < tokenRefreshSkew ||
+		remaining < t.ExpiresAt.Sub(t.IssuedAt)/2
 }
 
 // TokenSource returns a JWT that identifies a workload, to be presented to an

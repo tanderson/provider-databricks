@@ -33,6 +33,13 @@ type ProviderConfigSpec struct {
 	// +optional
 	TokenExchange *TokenExchange `json:"tokenExchange,omitempty"`
 
+	// AccountID is the Databricks account ID, for account-level operations
+	// through the accounts console host (for example
+	// https://accounts.azuredatabricks.net). Used when Credentials.Source is
+	// ServiceAccountToken; leave unset for a workspace host.
+	// +optional
+	AccountID *string `json:"accountID,omitempty"`
+
 	// ClientID is the user-assigned managed identity's ID
 	// when Credentials.Source is `InjectedIdentity`. If unset and
 	// Credentials.Source is `InjectedIdentity`, then a system-assigned
@@ -122,6 +129,8 @@ type ClusterProviderConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// A ProviderConfigSpec defines the desired state of a ClusterProviderConfig.
+	// +kubebuilder:validation:XValidation:rule="self.credentials.source != 'ServiceAccountToken' || (has(self.credentials.serviceAccountRef) && has(self.credentials.serviceAccountRef.namespace))",message="serviceAccountRef with a namespace is required when credentials.source is ServiceAccountToken"
 	Spec   ProviderConfigSpec   `json:"spec"`
 	Status ProviderConfigStatus `json:"status,omitempty"`
 }

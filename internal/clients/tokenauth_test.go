@@ -242,6 +242,32 @@ func TestTokenCache(t *testing.T) {
 		}
 	})
 
+	t.Run("re-exchanges long-lived tokens hourly", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		src := &countingSource{key: "sa-long"}
+		// Entra ID issues managed identity tokens valid for about 24 hours.
+		ex := &countingExchanger{key: "id-long", lifetime: 24 * time.Hour, now: clock}
+
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(59 * time.Minute)
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+		if ex.calls.Load() != 1 {
+			t.Errorf("exchanger calls = %d at 59 minutes, want 1 (still cached)", ex.calls.Load())
+		}
+		now = now.Add(2 * time.Minute)
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+		if ex.calls.Load() != 2 {
+			t.Errorf("exchanger calls = %d at 61 minutes, want 2 (re-exchanged after maxTokenReuse)", ex.calls.Load())
+		}
+	})
+
 	t.Run("keeps identities apart", func(t *testing.T) {
 		c := NewTokenCache()
 		c.Now = clock
