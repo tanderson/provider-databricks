@@ -50,8 +50,9 @@ const (
 	evictionInterval = 10 * time.Minute
 
 	// exchangeTimeout bounds a token exchange that the authority accepts but
-	// never answers. Reconcile contexts usually have no deadline, and a stuck
-	// exchange would hold its identity's cache lock.
+	// never answers. The reconcile's deadline (three minutes for this
+	// provider's controllers) also applies; this is shorter, because a stuck
+	// exchange holds its identity's cache lock.
 	exchangeTimeout = 30 * time.Second
 
 	errRequestSAToken  = "cannot request a token for service account %s/%s"
