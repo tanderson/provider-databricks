@@ -34,8 +34,10 @@ const (
 	// service account tokens. 600 is the minimum the API server accepts.
 	serviceAccountTokenExpirationSeconds = 600
 
-	// tokenRefreshSkew is how long before expiry a cached access token is
-	// treated as expired, so that a token is never handed out about to lapse.
+	// tokenRefreshSkew is the minimum remaining lifetime of a cached access
+	// token handed out. Tokens are normally refreshed earlier, at half their
+	// lifetime, because upjet's async operations keep the token they started
+	// with for the whole operation.
 	tokenRefreshSkew = 5 * time.Minute
 
 	errRequestSAToken  = "cannot request a token for service account %s/%s"
@@ -47,10 +49,20 @@ const (
 	errExchangeEmpty   = "token exchange response has no access_token"
 )
 
-// AccessToken is a bearer token and its expiry.
+// AccessToken is a bearer token, when it was obtained and when it expires.
 type AccessToken struct {
 	Value     string
+	IssuedAt  time.Time
 	ExpiresAt time.Time
+}
+
+// needsRefresh reports whether a cached token should be replaced: once half
+// its lifetime has passed, or when less than tokenRefreshSkew remains. Handing
+// out only tokens with at least half their lifetime left (about 30 minutes for
+// Entra ID) leaves room for long-running operations that keep the token.
+func (t *AccessToken) needsRefresh(now time.Time) bool {
+	remaining := t.ExpiresAt.Sub(now)
+	return remaining < tokenRefreshSkew || remaining < t.ExpiresAt.Sub(t.IssuedAt)/2
 }
 
 // TokenSource returns a JWT that identifies a workload, to be presented to an
@@ -66,6 +78,8 @@ type TokenSource interface {
 // Exchanger trades a workload JWT for an access token the downstream API
 // accepts.
 type Exchanger interface {
+	// Audience the workload JWT must carry for this exchange.
+	Audience() string
 	// Exchange returns an access token for the given JWT.
 	Exchange(ctx context.Context, jwt string) (*AccessToken, error)
 	// CacheKey identifies the identity the access token is issued for.
@@ -177,7 +191,13 @@ func (e *AzureADExchanger) Exchange(ctx context.Context, jwt string) (*AccessTok
 	if err != nil {
 		return nil, errors.Wrap(err, errExchangeDecode)
 	}
-	return &AccessToken{Value: tr.AccessToken, ExpiresAt: e.now().Add(time.Duration(expiresIn) * time.Second)}, nil
+	now := e.now()
+	return &AccessToken{Value: tr.AccessToken, IssuedAt: now, ExpiresAt: now.Add(time.Duration(expiresIn) * time.Second)}, nil
+}
+
+// Audience is the audience Entra ID requires on a federated client assertion.
+func (e *AzureADExchanger) Audience() string {
+	return AzureADTokenExchangeAudience
 }
 
 // CacheKey identifies the Entra identity and scope the token is issued for.
@@ -262,8 +282,8 @@ func NewTokenCache() *TokenCache {
 }
 
 // Get returns a cached access token for the source/exchanger pair, or obtains
-// a new one when none is cached or the cached one is within tokenRefreshSkew
-// of expiring. Failures are not cached.
+// a new one when none is cached or the cached one needs refreshing (see
+// AccessToken.needsRefresh). Failures are not cached.
 func (c *TokenCache) Get(ctx context.Context, src TokenSource, ex Exchanger) (*AccessToken, error) {
 	key := src.CacheKey() + "->" + ex.CacheKey()
 
@@ -277,7 +297,7 @@ func (c *TokenCache) Get(ctx context.Context, src TokenSource, ex Exchanger) (*A
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.token != nil && c.now().Add(tokenRefreshSkew).Before(e.token.ExpiresAt) {
+	if e.token != nil && !e.token.needsRefresh(c.now()) {
 		return e.token, nil
 	}
 

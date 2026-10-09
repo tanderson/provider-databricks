@@ -119,7 +119,7 @@ func TestAzureADExchanger(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Exchange() error: %v", err)
 		}
-		if diff := cmp.Diff(&AccessToken{Value: "entra-token", ExpiresAt: now.Add(3599 * time.Second)}, got); diff != "" {
+		if diff := cmp.Diff(&AccessToken{Value: "entra-token", IssuedAt: now, ExpiresAt: now.Add(3599 * time.Second)}, got); diff != "" {
 			t.Errorf("Exchange() (-want +got):\n%s", diff)
 		}
 	})
@@ -195,15 +195,17 @@ func (e *countingExchanger) Exchange(_ context.Context, jwt string) (*AccessToke
 	if e.fail {
 		return nil, errors.New("exchange failed")
 	}
-	return &AccessToken{Value: "access-for-" + jwt, ExpiresAt: e.now().Add(e.lifetime)}, nil
+	now := e.now()
+	return &AccessToken{Value: "access-for-" + jwt, IssuedAt: now, ExpiresAt: now.Add(e.lifetime)}, nil
 }
+func (e *countingExchanger) Audience() string { return "test-audience" }
 func (e *countingExchanger) CacheKey() string { return e.key }
 
 func TestTokenCache(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	t.Run("reuses a token until it nears expiry", func(t *testing.T) {
+	t.Run("reuses a token until half its lifetime has passed", func(t *testing.T) {
 		c := NewTokenCache()
 		c.Now = clock
 		src := &countingSource{key: "sa-a"}
@@ -219,12 +221,24 @@ func TestTokenCache(t *testing.T) {
 			t.Errorf("calls: source %d, exchanger %d; want 1 each", src.calls.Load(), ex.calls.Load())
 		}
 
-		now = now.Add(time.Hour - tokenRefreshSkew + time.Second)
+		now = now.Add(29 * time.Minute)
 		if _, err := c.Get(context.Background(), src, ex); err != nil {
 			t.Fatal(err)
 		}
+		if ex.calls.Load() != 1 {
+			t.Errorf("exchanger calls = %d at 29 of 60 minutes, want 1 (still cached)", ex.calls.Load())
+		}
+
+		now = now.Add(2 * time.Minute)
+		got, err := c.Get(context.Background(), src, ex)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if ex.calls.Load() != 2 {
-			t.Errorf("exchanger calls = %d after nearing expiry, want 2", ex.calls.Load())
+			t.Errorf("exchanger calls = %d at 31 of 60 minutes, want 2 (refreshed)", ex.calls.Load())
+		}
+		if remaining := got.ExpiresAt.Sub(now); remaining < 30*time.Minute {
+			t.Errorf("handed out a token with %s left, want at least half its lifetime", remaining)
 		}
 	})
 
