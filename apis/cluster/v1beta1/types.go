@@ -11,16 +11,35 @@ import (
 )
 
 // A ProviderConfigSpec defines the desired state of a ProviderConfig.
+// +kubebuilder:validation:XValidation:rule="self.credentials.source != 'ServiceAccountToken' || has(self.host)",message="host is required when credentials.source is ServiceAccountToken"
 type ProviderConfigSpec struct {
 	// Credentials required to authenticate to this provider.
 	Credentials ProviderCredentials `json:"credentials"`
+
+	// Host is the Databricks workspace URL (or the accounts console URL for
+	// account-level operations) the provider calls. Required when
+	// Credentials.Source is ServiceAccountToken.
+	// +optional
+	Host *string `json:"host,omitempty"`
+
+	// TokenExchange configures how a workload token is exchanged for an
+	// access token when Credentials.Source is ServiceAccountToken. Defaults
+	// to type AzureAD.
+	// +optional
+	TokenExchange *TokenExchange `json:"tokenExchange,omitempty"`
 }
 
 // ProviderCredentials required to authenticate.
+// +kubebuilder:validation:XValidation:rule="self.source != 'ServiceAccountToken' || (has(self.serviceAccountRef) && has(self.serviceAccountRef.namespace))",message="serviceAccountRef with a namespace is required when source is ServiceAccountToken"
 type ProviderCredentials struct {
 	// Source of the provider credentials.
-	// +kubebuilder:validation:Enum=None;Secret;UserAssignedManagedIdentity;SystemAssignedManagedIdentity;OIDCTokenFile;Upbound;Filesystem
+	// +kubebuilder:validation:Enum=None;Secret;UserAssignedManagedIdentity;SystemAssignedManagedIdentity;OIDCTokenFile;Upbound;Filesystem;ServiceAccountToken
 	Source xpv2.CredentialsSource `json:"source"`
+
+	// ServiceAccountRef selects the service account the provider requests
+	// tokens for when Source is ServiceAccountToken.
+	// +optional
+	ServiceAccountRef *ServiceAccountReference `json:"serviceAccountRef,omitempty"`
 
 	xpv2.CommonCredentialSelectors `json:",inline"`
 }

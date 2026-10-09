@@ -1,0 +1,257 @@
+package clients
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/pkg/errors"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+)
+
+func TestServiceAccountTokenSource(t *testing.T) {
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "dp-ns", Name: "dp-canary"}}
+
+	t.Run("requests a short-lived token for the named service account", func(t *testing.T) {
+		var got *authenticationv1.TokenRequest
+		var gotKey client.ObjectKey
+		kube := fake.NewClientBuilder().WithObjects(sa).WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceCreate: func(ctx context.Context, c client.Client, sub string, obj client.Object, subObj client.Object, opts ...client.SubResourceCreateOption) error {
+				if sub != "token" {
+					t.Fatalf("subresource = %q, want token", sub)
+				}
+				gotKey = client.ObjectKeyFromObject(obj)
+				got = subObj.(*authenticationv1.TokenRequest)
+				return c.SubResource(sub).Create(ctx, obj, subObj, opts...)
+			},
+		}).Build()
+
+		src := &ServiceAccountTokenSource{Client: kube, Namespace: "dp-ns", Name: "dp-canary", Audiences: []string{AzureADTokenExchangeAudience}}
+		tok, err := src.Token(context.Background())
+		if err != nil {
+			t.Fatalf("Token() error: %v", err)
+		}
+		if tok != "fake-token" {
+			t.Errorf("Token() = %q, want fake-token", tok)
+		}
+		if diff := cmp.Diff(client.ObjectKey{Namespace: "dp-ns", Name: "dp-canary"}, gotKey); diff != "" {
+			t.Errorf("service account (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{AzureADTokenExchangeAudience}, got.Spec.Audiences); diff != "" {
+			t.Errorf("audiences (-want +got):\n%s", diff)
+		}
+		if got.Spec.ExpirationSeconds == nil || *got.Spec.ExpirationSeconds != serviceAccountTokenExpirationSeconds {
+			t.Errorf("expirationSeconds = %v, want %d", got.Spec.ExpirationSeconds, serviceAccountTokenExpirationSeconds)
+		}
+	})
+
+	t.Run("fails when the service account doesn't exist", func(t *testing.T) {
+		kube := fake.NewClientBuilder().Build()
+		src := &ServiceAccountTokenSource{Client: kube, Namespace: "dp-ns", Name: "missing", Audiences: []string{AzureADTokenExchangeAudience}}
+		if _, err := src.Token(context.Background()); err == nil {
+			t.Fatal("Token() error = nil, want an error")
+		}
+	})
+
+	t.Run("fails on permission denied", func(t *testing.T) {
+		kube := fake.NewClientBuilder().WithObjects(sa).WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceCreate: func(context.Context, client.Client, string, client.Object, client.Object, ...client.SubResourceCreateOption) error {
+				return errors.New("serviceaccounts \"dp-canary\" is forbidden")
+			},
+		}).Build()
+		src := &ServiceAccountTokenSource{Client: kube, Namespace: "dp-ns", Name: "dp-canary", Audiences: []string{AzureADTokenExchangeAudience}}
+		_, err := src.Token(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "dp-ns/dp-canary") || !strings.Contains(err.Error(), "forbidden") {
+			t.Fatalf("Token() error = %v, want it to name the service account and the cause", err)
+		}
+	})
+
+	t.Run("cache key names the namespace, account and audiences", func(t *testing.T) {
+		a := &ServiceAccountTokenSource{Namespace: "ns-a", Name: "sa", Audiences: []string{"x"}}
+		b := &ServiceAccountTokenSource{Namespace: "ns-b", Name: "sa", Audiences: []string{"x"}}
+		c := &ServiceAccountTokenSource{Namespace: "ns-a", Name: "sa", Audiences: []string{"y"}}
+		if a.CacheKey() == b.CacheKey() || a.CacheKey() == c.CacheKey() {
+			t.Errorf("cache keys collide: %q %q %q", a.CacheKey(), b.CacheKey(), c.CacheKey())
+		}
+	})
+}
+
+func TestAzureADExchanger(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+	t.Run("sends a client assertion grant and returns the access token", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/tenant-1/oauth2/v2.0/token" {
+				t.Errorf("request = %s %s, want POST /tenant-1/oauth2/v2.0/token", r.Method, r.URL.Path)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"grant_type":            "client_credentials",
+				"client_id":             "client-1",
+				"scope":                 AzureDatabricksScope,
+				"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+				"client_assertion":      "the-jwt",
+			}
+			for k, v := range want {
+				if got := r.PostForm.Get(k); got != v {
+					t.Errorf("form %s = %q, want %q", k, got, v)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token_type":"Bearer","expires_in":3599,"access_token":"entra-token"}`))
+		}))
+		defer srv.Close()
+
+		ex := &AzureADExchanger{HTTPClient: srv.Client(), AuthorityHost: srv.URL, TenantID: "tenant-1", ClientID: "client-1", Now: func() time.Time { return now }}
+		got, err := ex.Exchange(context.Background(), "the-jwt")
+		if err != nil {
+			t.Fatalf("Exchange() error: %v", err)
+		}
+		if diff := cmp.Diff(&AccessToken{Value: "entra-token", ExpiresAt: now.Add(3599 * time.Second)}, got); diff != "" {
+			t.Errorf("Exchange() (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("accepts expires_in as a string", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"expires_in":"600","access_token":"t"}`))
+		}))
+		defer srv.Close()
+		ex := &AzureADExchanger{HTTPClient: srv.Client(), AuthorityHost: srv.URL, TenantID: "t", ClientID: "c", Now: func() time.Time { return now }}
+		got, err := ex.Exchange(context.Background(), "jwt")
+		if err != nil || !got.ExpiresAt.Equal(now.Add(600*time.Second)) {
+			t.Fatalf("Exchange() = %v, %v; want expiry in 600s", got, err)
+		}
+	})
+
+	t.Run("reports the Entra error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_client","error_description":"AADSTS700213: No matching federated identity record found"}`))
+		}))
+		defer srv.Close()
+		ex := &AzureADExchanger{HTTPClient: srv.Client(), AuthorityHost: srv.URL, TenantID: "t", ClientID: "c"}
+		_, err := ex.Exchange(context.Background(), "jwt")
+		if err == nil || !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "AADSTS700213") {
+			t.Fatalf("Exchange() error = %v, want status and Entra message", err)
+		}
+	})
+
+	t.Run("fails when access_token is missing", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"expires_in":3600}`))
+		}))
+		defer srv.Close()
+		ex := &AzureADExchanger{HTTPClient: srv.Client(), AuthorityHost: srv.URL, TenantID: "t", ClientID: "c"}
+		if _, err := ex.Exchange(context.Background(), "jwt"); err == nil {
+			t.Fatal("Exchange() error = nil, want an error")
+		}
+	})
+
+	t.Run("defaults authority and scope", func(t *testing.T) {
+		ex := &AzureADExchanger{TenantID: "t", ClientID: "c"}
+		if got, want := ex.tokenEndpoint(), "https://login.microsoftonline.com/t/oauth2/v2.0/token"; got != want {
+			t.Errorf("tokenEndpoint() = %q, want %q", got, want)
+		}
+		if ex.scope() != AzureDatabricksScope {
+			t.Errorf("scope() = %q, want %q", ex.scope(), AzureDatabricksScope)
+		}
+	})
+}
+
+type countingSource struct {
+	key   string
+	calls atomic.Int32
+}
+
+func (s *countingSource) Token(context.Context) (string, error) {
+	s.calls.Add(1)
+	return "jwt-" + s.key, nil
+}
+func (s *countingSource) CacheKey() string { return s.key }
+
+type countingExchanger struct {
+	key      string
+	lifetime time.Duration
+	now      func() time.Time
+	calls    atomic.Int32
+	fail     bool
+}
+
+func (e *countingExchanger) Exchange(_ context.Context, jwt string) (*AccessToken, error) {
+	e.calls.Add(1)
+	if e.fail {
+		return nil, errors.New("exchange failed")
+	}
+	return &AccessToken{Value: "access-for-" + jwt, ExpiresAt: e.now().Add(e.lifetime)}, nil
+}
+func (e *countingExchanger) CacheKey() string { return e.key }
+
+func TestTokenCache(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	t.Run("reuses a token until it nears expiry", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		src := &countingSource{key: "sa-a"}
+		ex := &countingExchanger{key: "id-a", lifetime: time.Hour, now: clock}
+
+		for range 3 {
+			got, err := c.Get(context.Background(), src, ex)
+			if err != nil || got.Value != "access-for-jwt-sa-a" {
+				t.Fatalf("Get() = %v, %v", got, err)
+			}
+		}
+		if src.calls.Load() != 1 || ex.calls.Load() != 1 {
+			t.Errorf("calls: source %d, exchanger %d; want 1 each", src.calls.Load(), ex.calls.Load())
+		}
+
+		now = now.Add(time.Hour - tokenRefreshSkew + time.Second)
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+		if ex.calls.Load() != 2 {
+			t.Errorf("exchanger calls = %d after nearing expiry, want 2", ex.calls.Load())
+		}
+	})
+
+	t.Run("keeps identities apart", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		srcA, srcB := &countingSource{key: "sa-a"}, &countingSource{key: "sa-b"}
+		ex := &countingExchanger{key: "id", lifetime: time.Hour, now: clock}
+		a, _ := c.Get(context.Background(), srcA, ex)
+		b, _ := c.Get(context.Background(), srcB, ex)
+		if a.Value == b.Value {
+			t.Errorf("different service accounts got the same token %q", a.Value)
+		}
+	})
+
+	t.Run("doesn't cache failures", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		src := &countingSource{key: "sa"}
+		ex := &countingExchanger{key: "id", lifetime: time.Hour, now: clock, fail: true}
+		for range 2 {
+			if _, err := c.Get(context.Background(), src, ex); err == nil {
+				t.Fatal("Get() error = nil, want an error")
+			}
+		}
+		if ex.calls.Load() != 2 {
+			t.Errorf("exchanger calls = %d, want 2 (failures retried)", ex.calls.Load())
+		}
+	})
+}

@@ -95,6 +95,31 @@ spec:
                     - name
                     - namespace
                     type: object
+                  serviceAccountRef:
+                    description: |-
+                      ServiceAccountRef selects the service account the provider requests
+                      tokens for when Source is ServiceAccountToken.
+                    properties:
+                      audiences:
+                        description: |-
+                          Audiences requested on the token in addition to the one the token
+                          exchange requires (api://AzureADTokenExchange for AzureAD).
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      name:
+                        description: Name of the service account.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace of the service account. Required: this ProviderConfig is
+                          cluster-scoped, so there is no namespace to default to.
+                        type: string
+                    required:
+                    - name
+                    type: object
                   source:
                     description: Source of the provider credentials.
                     enum:
@@ -105,13 +130,49 @@ spec:
                     - OIDCTokenFile
                     - Upbound
                     - Filesystem
+                    - ServiceAccountToken
                     type: string
                 required:
                 - source
                 type: object
+                x-kubernetes-validations:
+                - message: serviceAccountRef with a namespace is required when source
+                    is ServiceAccountToken
+                  rule: self.source != 'ServiceAccountToken' || (has(self.serviceAccountRef)
+                    && has(self.serviceAccountRef.namespace))
+              host:
+                description: |-
+                  Host is the Databricks workspace URL (or the accounts console URL for
+                  account-level operations) the provider calls. Required when
+                  Credentials.Source is ServiceAccountToken.
+                type: string
+              tokenExchange:
+                description: |-
+                  TokenExchange configures how a workload token is exchanged for an
+                  access token when Credentials.Source is ServiceAccountToken. Defaults
+                  to type AzureAD.
+                properties:
+                  azureAD:
+                    description: AzureAD holds settings specific to the AzureAD exchange.
+                    properties:
+                      authorityHost:
+                        description: |-
+                          AuthorityHost of the Entra ID token endpoint. Defaults to
+                          https://login.microsoftonline.com/.
+                        type: string
+                    type: object
+                  type:
+                    description: Type of the exchange. Defaults to AzureAD when omitted.
+                    enum:
+                    - AzureAD
+                    type: string
+                type: object
             required:
             - credentials
             type: object
+            x-kubernetes-validations:
+            - message: host is required when credentials.source is ServiceAccountToken
+              rule: self.credentials.source != 'ServiceAccountToken' || has(self.host)
           status:
             description: A ProviderConfigStatus reflects the observed state of a ProviderConfig.
             properties:
