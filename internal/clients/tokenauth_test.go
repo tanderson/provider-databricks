@@ -341,6 +341,40 @@ func TestTokenCache(t *testing.T) {
 		}
 	})
 
+	t.Run("refuses the cached token when the hourly re-exchange fails", func(t *testing.T) {
+		c := NewTokenCache()
+		c.Now = clock
+		src := &countingSource{key: "sa-revoked"}
+		// Entra ID issues managed identity tokens valid for about 24 hours.
+		ex := &countingExchanger{key: "id-revoked", lifetime: 24 * time.Hour, now: clock}
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+
+		// A use shortly before maxTokenReuse runs the eviction sweep, so the
+		// next Get finds the stale entry rather than an evicted one.
+		now = now.Add(maxTokenReuse - 5*time.Minute)
+		if _, err := c.Get(context.Background(), src, ex); err != nil {
+			t.Fatal(err)
+		}
+
+		// The identity is revoked (federated credential, RBAC or identity
+		// removed): the cached token is still valid at Entra ID, but past
+		// maxTokenReuse it must not be handed out again.
+		ex.fail = true
+		now = now.Add(5 * time.Minute)
+		if _, ok := c.entries["sa-revoked->id-revoked"]; !ok {
+			t.Fatal("entry evicted before the re-exchange; the test wouldn't exercise the cached token")
+		}
+		got, err := c.Get(context.Background(), src, ex)
+		if err == nil {
+			t.Fatalf("Get() = %q, nil; want an error, not the cached token", got.Value)
+		}
+		if got != nil {
+			t.Errorf("Get() returned a token alongside the error: %q", got.Value)
+		}
+	})
+
 	t.Run("doesn't cache failures", func(t *testing.T) {
 		c := NewTokenCache()
 		c.Now = clock
